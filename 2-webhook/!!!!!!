@@ -1,0 +1,73 @@
+---
+apiVersion: triggers.tekton.dev/v1beta1
+kind: TriggerTemplate
+metadata:
+  name: sbom-template
+spec:
+  params:
+  - name: app_name
+  - name: app_version
+  - name: component_name
+  - name: build_number
+  - name: repository_name
+  - name: repository_url
+  - name: repository_branch
+  - name: repository_commit_sha
+  - name: image
+  - name: image_name   
+  - name: image_tag
+  resourcetemplates:
+  - apiVersion: tekton.dev/v1
+    kind: PipelineRun
+    metadata:
+      generateName: sbom-pipeline-run-
+    spec:
+      pipelineRef:
+        name: sbom-pipeline
+      params:
+      - name: component_name
+        value: $(tt.params.component_name)
+      - name: app_name
+        value: $(tt.params.app_name)
+      - name: build_number
+        value: 1
+      - name: app_version
+        value: "4.1.0"
+      - name: repository_name
+        value: "$(tt.params.repository_name)"
+      - name: repository_url
+        value: "$(tt.params.repository_url)"
+      - name: repository_branch
+        value: "$(tt.params.repository_branch)"
+      - name: repository_commit_sha
+        value: "$(tt.params.repository_commit_sha)"
+      - name: image
+        value: "quay.io/techzone_h7z7a7ty/Swini@ansible*8989"
+      - name: image_name
+        value: $(tt.params.component_name)
+      - name: image_tag
+        value: "4.1.0"
+      - name: access_point_name
+        value: $(tt.params.component_name)
+      - name: app_endpoint
+        value: "/$(tt.params.component_name)"
+      workspaces:
+      - name: output
+        volumeClaimTemplate:
+          spec:
+            accessModes:
+            - ReadWriteOnce
+            resources:
+              requests:
+                storage: 1Gi
+      - name: dockerconfig
+        secret:
+          secretName: container-registry-secret
+          items:
+          - key: .dockerconfigjson
+            path: config.json
+      taskRunTemplate:
+        podTemplate:
+          securityContext:
+            runAsUser: 0
+            fsGroup: 65532

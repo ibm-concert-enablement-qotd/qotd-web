@@ -1,0 +1,333 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: sbom-pipeline
+spec:
+  workspaces:
+    - name: output
+    - name: dockerconfig
+  params:
+    - name: component_name
+    - name: app_name
+    - name: build_number
+      default: 1
+    - name: app_version
+    - name: repository_name
+    - name: repository_url
+    - name: repository_branch
+      default: main
+    - name: repository_commit_sha
+    - name: image
+    - name: image_tag
+    - name: concert_urn_prefix
+      default: "urn:ibm:appmgmt"
+    - name: app_url
+      default: "qotd-web-qotd.apps.concert.aws.ibm-gtmaa.dev"
+    - name: app_port
+      default: "443"
+    - name: env_target
+      default: "production"
+    - name: base_url
+      default: "https://github.com/ibm-concert-enablement-qotd/qotd-web.git"
+    - name: image_name
+    - name: k8s_name
+      default: "k8s-concert"
+    - name: k8s_cluster_name
+      default: "ncolon"
+    - name: k8s_platform
+      default: "ocp"
+    - name: k8s_env_platform
+      default: "aws"
+    - name: k8s_region
+      default: "us-east-2"
+    - name: k8s_cluster_id
+      default: "ncolon-hhdtl"
+    - name: k8s_apiserver
+      default: https://api.concert.aws.ibm-gtmaa.dev:6443
+    - name: access_point_name
+    - name: app_criticality
+      default: "5"
+    - name: app_endpoint
+    - name: app_endpoint_exposure
+      default: "public"
+    - name: "business_name"
+      default: IBM
+    - name: "business_unit"
+      default: IBM CS
+    - name: "business_email"
+      default: "get-a-quote@qotdweb.com"
+    - name: business_phone
+      default: "900-688-8969"
+
+  tasks:
+    - name: git-clone
+      taskRef:
+        resolver: cluster
+        params:
+        - name: kind
+          value: task
+        - name: name
+          value: git-clone
+        - name: namespace
+          value: openshift-pipelines
+      params:
+      - name: URL
+        value: $(params.repository_url)
+      - name: REVISION
+        value: $(params.repository_branch)
+      - name: SUBDIRECTORY
+        value: $(params.component_name)
+      workspaces:
+        - name: output
+          workspace: output
+    - name: pre-concert
+      runAfter:
+        - git-clone
+      params:
+      - name: component_name
+        value: $(params.component_name)
+      taskRef:
+        name: pre-concert
+      workspaces:
+        - name: output
+          workspace: output
+    - name: code-scan
+      runAfter:
+        - pre-concert
+      params:
+      - name: component_name
+        value: $(params.component_name)
+      taskRef:
+        name: code-scan
+      workspaces:
+        - name: output
+          workspace: output
+    - name: kaniko-build
+      runAfter:
+        - code-scan
+      taskRef:
+        name: kaniko
+      workspaces:
+        - name: source
+          workspace: output
+        - name: dockerconfig
+          workspace: dockerconfig
+      params:
+      - name: IMAGE
+        value: $(params.image)
+      - name: DOCKERFILE
+        value: "$(params.component_name)/Dockerfile"
+      - name: CONTEXT
+        value: "$(params.component_name)/"
+      - name: APP_VERSION
+        value: $(params.app_version)
+    - name: skopeo-copy
+      runAfter:
+        - kaniko-build
+      taskRef:
+        name: skopeo-copy
+      workspaces:
+        - name: images-url
+          workspace: output
+        - name: dockerconfig
+          workspace: dockerconfig
+      params:
+      - name: srcImageURL
+        value: "docker://$(params.image)@$(tasks.kaniko-build.results.IMAGE_DIGEST)"
+      - name: destImageURL
+        value: "docker://$(params.image):$(tasks.kaniko-build.results.IMAGE_NEWTAG)"
+      - name: srcTLSverify
+        value: "false"
+      - name: destTLSverify
+        value: "false"
+    - name: image-scan
+      runAfter:
+        - skopeo-copy
+      taskRef:
+        name: image-scan
+      workspaces:
+        - name: output
+          workspace: output
+      params:
+      - name: image
+        value: $(params.image)
+      - name: image_tag
+        value: $(tasks.kaniko-build.results.IMAGE_NEWTAG)
+    - name: cve-scan
+      runAfter:
+        - image-scan
+      taskRef:
+        name: cve-scan
+      workspaces:
+        - name: output
+          workspace: output
+      params:
+      - name: image
+        value: $(params.image)
+      - name: image_tag
+        value: $(tasks.kaniko-build.results.IMAGE_NEWTAG)
+    - name: build-sbom
+      runAfter:
+        - cve-scan
+      taskRef:
+        name: build-sbom
+      workspaces:
+        - name: output
+          workspace: output
+      params:
+      - name: component_name
+        value: $(params.component_name)
+      - name: app_name
+        value: $(params.app_name)
+      - name: build_number
+        value: $(params.build_number)
+      - name: app_version
+        value: $(params.app_version)
+      - name: repository_name
+        value: $(params.repository_name)
+      - name: repository_url
+        value: $(params.repository_url)
+      - name: repository_branch
+        value: $(params.repository_branch)
+      - name: repository_commit_sha
+        value: $(params.repository_commit_sha)
+      - name: image
+        value: $(params.image)
+      - name: image_tag
+        value: $(tasks.kaniko-build.results.IMAGE_NEWTAG)
+      - name: image_digest
+        value: $(tasks.kaniko-build.results.IMAGE_DIGEST)
+      - name: concert_urn_prefix
+        value: $(params.concert_urn_prefix)
+      - name: codescan_file
+        value: $(tasks.code-scan.results.output)
+      - name: imagescan_file
+        value: $(tasks.image-scan.results.output)
+    - name: deploy-sbom
+      runAfter:
+        - build-sbom
+      taskRef:
+        name: deploy-sbom
+      workspaces:
+        - name: output
+          workspace: output
+      params:
+      - name: component_name
+        value: $(params.component_name)
+      - name: app_name
+        value: $(params.app_name)
+      - name: app_version
+        value: $(params.app_version)
+      - name: app_url
+        value: $(params.app_url)
+      - name: access_point_name
+        value: $(params.component_name)
+      - name: env_target
+        value: $(params.env_target)
+      - name: repository_name
+        value: $(params.repository_name)
+      - name: repository_url
+        value: $(params.repository_url)
+      - name: repository_branch
+        value: $(params.repository_branch)
+      - name: repository_commit_sha
+        value: $(params.repository_commit_sha)
+      - name: build_number
+        value: $(params.build_number)
+      - name: k8s_name
+        value: $(params.k8s_name)
+      - name: k8s_platform
+        value: $(params.k8s_platform)
+      - name: k8s_env_platform
+        value: $(params.k8s_env_platform)
+      - name: k8s_cluster_id
+        value: $(params.k8s_cluster_id)
+      - name: k8s_region
+        value: $(params.k8s_region)
+      - name: k8s_cluster_name
+        value: $(params.k8s_cluster_name)
+      - name: k8s_namespace
+        value: $(params.app_name)
+      - name: k8s_apiserver
+        value: $(params.k8s_apiserver)
+      - name: image
+        value: $(params.image)
+      - name: image_name
+        value: $(params.image_name)
+      - name: image_tag
+        value: $(tasks.kaniko-build.results.IMAGE_NEWTAG)
+      - name: image_digest
+        value: $(tasks.kaniko-build.results.IMAGE_DIGEST)
+    - name: app-definition
+      runAfter:
+        - deploy-sbom
+      taskRef:
+        name: app-definition
+      workspaces:
+        - name: output
+          workspace: output
+      params:
+      - name: image
+        value: $(params.image)
+      - name: image_tag
+        value: $(tasks.kaniko-build.results.IMAGE_NEWTAG)
+      - name: image_name
+        value: $(params.image_name)
+      - name: app_name
+        value: $(params.app_name)
+      - name: app_version
+        value: $(params.app_version)
+      - name: component_name
+        value: $(params.component_name)
+      - name: repository_name
+        value: $(params.repository_name)
+      - name: repository_url
+        value: $(params.repository_url)
+      - name: app_endpoint
+        value: "/$(params.component_name)"
+      - name: access_point_name
+        value: $(params.component_name)
+      - name: app_criticality
+        value: $(params.app_criticality)
+      - name: app_endpoint_exposure
+        value: $(params.app_endpoint_exposure)
+      - name: business_name
+        value: $(params.business_name)
+      - name: business_unit
+        value: $(params.business_unit)
+      - name: business_email
+        value: $(params.business_email)
+      - name: business_phone
+        value: $(params.business_phone)
+      - name: env_target
+        value: $(params.env_target)
+    - name: upload-concert
+      runAfter:
+        - app-definition
+      taskRef:
+        name: upload-concert
+      workspaces:
+        - name: output
+          workspace: output
+      params:
+      - name: image
+        value: $(params.image)
+      - name: image_tag
+        value: $(tasks.kaniko-build.results.IMAGE_NEWTAG)
+      - name: component_name
+        value: $(params.component_name)
+      - name: base_url
+        value: $(params.base_url)
+      - name: app_definition_file
+        value: $(tasks.app-definition.results.output)
+      - name: code_scan_file
+        value: $(tasks.image-scan.results.output)
+      - name: build_sbom_file
+        value: $(tasks.build-sbom.results.output)
+      - name: deploy_sbom_file
+        value: $(tasks.deploy-sbom.results.output)
+      - name: cyclonedx_sbom_file
+        value: $(tasks.code-scan.results.output)
+      - name: cve_csv_file
+        value: $(tasks.cve-scan.results.output)
